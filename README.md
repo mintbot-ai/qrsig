@@ -1,114 +1,121 @@
 # QRSig: signed QR codes
 
-A QR code that says who made it.
+A QR code that says who made it. **One code. Two layers.**
 
-The issuer signs the code's content with a key its domain publishes. A
-scanner that knows QRSig shows **"Signed by pay.example.com"**; every other
-tested ordinary readers return the same content, because the signature is not
-in the content. It rides after the terminator, where readers normally stop.
-This is a draft padding extension, not a claim of strict ISO/IEC 18004
-conformance or compatibility with every scanner.
+The ordinary layer is still a URL, payment URI or text. QRSig adds an
+Ed25519 signature after the QR terminator, where ordinary readers stop.
+A QRSig-aware scanner also checks the issuer's domain and shows
+**“Signed by pay.example.com”**.
 
-```
-what a phone reads     bitcoin:bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh?amount=0.00123456
-what QRSig adds        signed by pay.example.com on 2026-11-10, Ed25519, 87 hidden bytes
-```
+**[Website & interactive demo](https://qrsig.org/)** ·
+[Specification](SPEC.md) · [Inside a signed QR](docs/EXPLAINED.md) ·
+[Build a scanner](docs/SCANNERS.md)
 
-- **[SPEC.md](SPEC.md)**: the standard. One block of bytes, one JSON file on
-  your domain, one verification procedure.
-- **[docs/SCANNERS.md](docs/SCANNERS.md)**: how a QR scanner reads and
-  checks the signature.
-- **`qrsig/`**: the reference implementation (Python).
-- **`examples/`**: a demo scanner and sample codes.
-- **[vectors.json](vectors.json)**: test vectors.
-- **[docs/EXPLAINED.md](docs/EXPLAINED.md)**: a byte-by-byte example, use cases
-  and what a signature does not prove.
+Status: **draft 1**. This is a padding extension, not a claim of strict
+ISO/IEC 18004 conformance or compatibility with every scanner. The format
+may change before 1.0. See [CHANGELOG.md](CHANGELOG.md) for revisions.
 
-Status: draft 1. The format may still change before 1.0.
+## Start with the demo
 
-## Why
+On [qrsig.org](https://qrsig.org/), follow **QR code → Address + signature →
+Verify**. Open the compact M, S and K panels to inspect the bytes and key
+source. Switch to a changed address: the same signature no longer matches.
+“Validate signature” checks the currently selected address; switching back
+restores the original.
 
-A QR code is an anonymous instruction: open this link, pay this address. A
-sticker over a parking meter's code, a swapped payment code on an invoice or
-a fake login code all work because nothing in the code says where it came
-from. QRSig gives a scanner or a wallet something to check before acting:
+The page is an interactive explanation, not a general-purpose image scanner:
+it checks bytes extracted from the example QR ahead of time. To decode and
+verify the actual PNG with domain-key discovery, use the CLI below.
+Bitcoin is just the example; QRSig can sign other UTF-8 content too.
 
-- a wallet can show which service generated a payment address, and warn when
-  a code that claims to be from that service is not;
-- a login or ticket app can refuse codes its own domain did not sign;
-- a printed code stays verifiable for as long as the issuer keeps its key
-  published.
+## Three inputs. One signature check.
 
-What it does not do: stop a signed code from being copied, or tell you
-whether the signing domain deserves trust. It authenticates a domain-key
-claim, not a person, a safe destination, payment completion or a physical object.
-See the security section of the spec.
+| Input | What it is | Where it comes from |
+|---|---|---|
+| **M — message** | `context || header || payload` | Fixed QRSig context plus bytes read from the QR |
+| **S — signature** | 64 raw Ed25519 bytes | The QRSig block in the QR padding |
+| **K — public key** | 32 raw Ed25519 bytes | The signing domain's HTTPS key document |
 
-## How it works
-
-```
- issuer                                   scanner
- ------                                   -------
- content ──┐                              read code as usual ──► content (shown at once)
-           ├─ Ed25519 sign ─► block       take the bytes after the terminator ──► block
- domain ───┘        │                     GET https://<domain>/.well-known/qrsig.json
-                    ▼                     verify block against the domain's keys
- QR code: | content | terminator | block | padding |        ──► "Signed by <domain>"
+```text
+M = ASCII("qrsig1\n") || header || payload
+Ed25519.verify(K, S, M) → true or false
 ```
 
-1. The domain publishes its public key at `/.well-known/qrsig.json`.
-2. The block (magic, version, time, domain, signature: 72 bytes plus the
-   domain name) replaces the first padding bytes of the code.
-3. A scanner reads the block, fetches the domain's keys over HTTPS and
-   reports one of four outcomes: `verified`, `invalid`, `unverifiable`,
-   `unsigned`.
+`||` means joining bytes, not adding numbers or inserting separators. The
+header includes the domain and claimed issue time. The signature binds those
+fields to the exact payload; it does not sign the image pixels.
 
-## Try it
+The boolean above is one cryptographic check, not the whole protocol.
+QRSig checks the block, time, key source and eligible keys, then reports:
+
+| Outcome | Meaning |
+|---|---|
+| `verified` | An eligible key published by the named domain verifies the message |
+| `invalid` | The claim fails: changed bytes, no matching/eligible published key, or an invalid time |
+| `unverifiable` | The keys could not be obtained now; this is not success |
+| `unsigned` | No supported, well-formed QRSig v1 block was found |
+
+A valid signature does not prove Bitcoin-address ownership, a safe URL,
+payment completion or that a copied code is original. Applications still
+need to know which domains they trust. Details: [security considerations](SPEC.md#9-security-considerations).
+
+## Try it locally
+
+Python 3.10+ is required. Install **this repository**, not the unrelated
+package with the same name on PyPI:
 
 ```sh
-pip install -e '.[read]'          # from a checkout; Python 3.10+
+git clone https://github.com/mintbot-ai/qrsig.git
+cd qrsig
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[read]'
+```
 
-# 1. Make a key. The JSON it prints goes to https://<your domain>/.well-known/qrsig.json
+### Check the published example
+
+```sh
+curl -fSLo live-qrsig.png https://qrsig.org/demo/bitcoin-signed.png
+qrsig verify live-qrsig.png
+```
+
+This decodes the image and fetches
+`https://qrsig.org/.well-known/qrsig.json` over HTTPS. When the issuer's key is
+available and matches, the result is `verified: signed by qrsig.org` followed
+by its claimed signing time. This is a live check, not an offline fixture;
+network availability and the issuer's current key document affect its result.
+**Do not send money to the demonstration address.**
+
+### Check the repository fixture, offline
+
+```sh
+qrsig verify examples/signed-bitcoin.png --offline --pin pay.example.com=examples/pay.example.com.qrsig.json
+qrsig verify examples/unsigned-bitcoin.png --offline
+```
+
+These report `verified` and `unsigned`, respectively. The fixture uses a
+public test key from [vectors.json](vectors.json); never use it in production.
+A pin checks the supplied key, not live domain control. `--pin` alone does not
+disable lookups for other domains; `--offline` does.
+
+CLI exit codes: **0** = verified, **1** = another verification outcome,
+**2** = input/read error. The unsigned example intentionally exits with 1.
+
+### Sign your own code
+
+```sh
 qrsig keygen -o qrsig-key.json > qrsig.json
-
-# 2. Sign a code
-qrsig sign 'bitcoin:bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh?amount=0.001' \
-      --domain pay.example.com --key qrsig-key.json -o code.png
-
-# 3. Check it without network access. Omit --offline and --pin for HTTPS discovery.
-qrsig verify code.png --offline --pin pay.example.com=qrsig.json
-# payload:   bitcoin:bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh?amount=0.001
-# signature: verified: signed by pay.example.com on <your signing time in UTC>
+qrsig sign 'https://example.com/invoice/8c1f' \
+      --domain example.com --key qrsig-key.json -o code.png
+qrsig verify code.png --offline --pin example.com=qrsig.json
 ```
 
-The repository carries a ready pair, signed with the test key of the
-vectors:
+Use your own domain for real codes. Keep `qrsig-key.json` private. Publish only
+`qrsig.json` at `https://<your-domain>/.well-known/qrsig.json`; then other
+readers can verify without a pin. [Key publication and rotation](SPEC.md#5-the-key-document)
+are part of the standard.
 
-```sh
-qrsig verify examples/signed-bitcoin.png --pin pay.example.com=examples/pay.example.com.qrsig.json
-qrsig verify examples/unsigned-bitcoin.png        # same content, unsigned
-```
-
-An ordinary compatible scanner shows only the Bitcoin URI, not the signature.
-The sample key is public test material: never use it in production and do not
-pay the example address. A pin checks the supplied key, not live domain control.
-`--pin` alone does not disable fetching for other domains; `--offline` does.
-Exit codes: 0 = verified, 1 = another verification outcome, 2 = input/read error.
-
-### The demo scanner
-
-```sh
-python examples/scanner_web.py --pin pay.example.com=examples/pay.example.com.qrsig.json
-# open http://127.0.0.1:8765, choose or photograph a code
-```
-
-It shows the content and, under it, "Signed by ...", a warning, or nothing,
-as section 7 of the spec asks of a scanner. It is offline by default: use
-`--pin` for trusted key documents. `--online` explicitly enables requests to
-signer-controlled hosts. This is a localhost demo, not a hardened public
-upload service; see the deployment warnings in [docs/SCANNERS.md](docs/SCANNERS.md).
-
-### In code
+### Use the Python API
 
 ```python
 from qrsig import keys, qr
@@ -117,62 +124,61 @@ private, public = keys.generate()
 code = qr.signed("https://example.com/invoice/8c1f", "example.com", keys.private_key(private))
 code.make_image().save("invoice.png")
 
-resolver = keys.Resolver(offline=True)               # pins only; no network
-resolver.pin("example.com", keys.document([public]).encode())   # here: the document, handed over
+resolver = keys.Resolver(offline=True)
+resolver.pin("example.com", keys.document([public]).encode())
 result = qr.check("invoice.png", resolver)
-result["status"], result["domain"]                   # "verified", "example.com"
+assert result["status"] == "verified"
+assert result["domain"] == "example.com"
 ```
 
-## In use: mintbot
+### Run the local scanner demo
 
-QRSig grew out of [mintbot](https://mintbot.ai), which signs the QR codes it
-shows. The purpose there is the one in the title: to be able to tell whether
-a payment or sign-in code was really generated by mintbot.
+```sh
+python examples/scanner_web.py --pin pay.example.com=examples/pay.example.com.qrsig.json
+# open http://127.0.0.1:8765, choose or photograph a code
+```
 
-- **Crypto payments.** The Bitcoin and Monero payment codes on mintbot's
-  checkout pages, and the panel links its Telegram bot sends, have a QRSig 1
-  implementation in mintbot: signed under `mintbot.ai`, with key publication at
-  `https://mintbot.ai/.well-known/qrsig.json`. The code that does it is small:
-  one function that builds the block, one route that serves the document.
-  This describes the integration code, not a guarantee that every live
-  deployment has updated or currently publishes the document.
-  mintbot's implementation is independent of this repository's and is tested
-  against `vectors.json`; `qrsig verify` reads mintbot's payment codes as
-  "verified: signed by mintbot.ai".
-- **Agent panels.** The sign-in, device-link and authenticator codes that a
-  customer's own agent server draws are signed by that server's key in an
-  earlier, mintbot-internal format (same place in the padding, a key id
-  instead of a domain). They move to QRSig once each agent host publishes its
-  own key document.
+Unlike the website illustration, this demo reads uploaded images. It is
+offline by default. `--online` enables lookups to signer-controlled hosts;
+it is not a hardened public upload service. Read the
+[network deployment guidance](docs/SCANNERS.md#3-get-the-domains-keys) first.
 
-Two things mintbot's rollout taught, both now in the spec:
+## For implementers
 
-- **The signature costs size.** About 80 bytes makes a code four to seven
-  versions larger. mintbot enlarged every displayed code by the same factor
-  (a payment code from 160 to 216 px), which brought the simulated scan
-  margin back to what it was.
-- **Styling costs more than signing.** With plain square modules, ZXing and
-  ZBar read signed codes as reliably as unsigned ones. Round dots and a logo
-  in the middle cost ZBar 5 to 17% of reads in mintbot's measurements,
-  signed or not. If a code must scan everywhere, draw it plain.
+- [SPEC.md](SPEC.md): block format, key document, verification and display rules.
+- [docs/EXPLAINED.md](docs/EXPLAINED.md): bytes, a runnable true/false example,
+  use cases and limitations.
+- [docs/SCANNERS.md](docs/SCANNERS.md): corrected QR codewords → payload and
+  padding → keys → verification → display.
+- [`qrsig/`](qrsig/): Python reference implementation.
+- [vectors.json](vectors.json) and [`examples/`](examples/): deterministic
+  fixtures, sample pictures and local scanner.
 
-## For scanner and wallet authors
+Keep the payload and padding from the same corrected QR stream. A text-only
+scanner API is not enough. Display the signing domain, not just a green tick.
 
-The change in a decoder is small: keep the bytes after the terminator instead
-of discarding them. [docs/SCANNERS.md](docs/SCANNERS.md) walks through it,
-with pseudo-code for parsing, fetching, verifying and displaying, and
-`qrsig/qr.py` is a complete reader to compare against.
+## Size and origins
+
+The hidden block costs **72 bytes + the domain length**, including its
+64-byte signature. Hex/base64 in a UI is only a display format; the QR stores
+raw signature bytes. Changing the display encoding does not shrink the QR.
+See the [measured size table](SPEC.md#8-notes-for-issuers).
+
+QRSig grew out of [mintbot](https://mintbot.ai). Its payment-code integration
+uses the QRSig 1 format; earlier agent-generated codes used a different,
+internal format. An integration's source code does not establish which
+version is running on every live deployment. The public specification and
+vectors here define interoperability.
 
 ## Tests
 
 ```sh
-pip install -e '.[test]'      # pyzbar also needs the zbar library (libzbar0)
+python -m pip install -e '.[test]'  # pyzbar also needs libzbar0
 python -m pytest
-python tools/make_vectors.py  # regenerates vectors.json; it must not change
+python tools/make_vectors.py       # vectors.json must remain unchanged
 ```
 
 ## Licence
 
-The code is under the MIT licence (see [LICENSE](LICENSE)). The
-specification may be implemented by anyone, for any purpose, without
-permission or fee.
+The code is under the MIT licence (see [LICENSE](LICENSE)). The specification
+may be implemented by anyone, for any purpose, without permission or fee.

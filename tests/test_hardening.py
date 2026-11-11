@@ -25,6 +25,22 @@ def test_base64url_accepts_canonical_encoding(raw):
     assert keys.b64url_decode(keys.b64url(raw)) == raw
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_document_rejects_non_json_constants_in_unknown_members(constant, nested):
+    entry: dict[str, object] = {"key": keys.b64url(bytes(range(32)))}
+    document: dict[str, object] = {"qrsig": 1, "keys": [entry]}
+    target = entry if nested else document
+    target["extra"] = float(constant)
+    with pytest.raises(ValueError, match="JSON constant"):
+        keys.parse_document(json.dumps(document).encode())
+
+
+def test_document_allows_constant_names_as_ordinary_strings():
+    document = {"qrsig": 1, "keys": [], "extra": ["NaN", "Infinity", "-Infinity"]}
+    assert keys.parse_document(json.dumps(document).encode()) == []
+
+
 @pytest.mark.parametrize("version", [True, 1.0])
 def test_document_requires_integer_version(version):
     with pytest.raises(ValueError, match="qrsig 1"):

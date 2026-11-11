@@ -2,6 +2,12 @@
 
 Status: draft 1 (2026-11-11). Comments and implementations welcome.
 
+[Website & interactive demo](https://qrsig.org/) ·
+[Plain-language explanation](docs/EXPLAINED.md) · [Scanner guide](docs/SCANNERS.md)
+
+This document defines the protocol. The website illustrates a single signature
+check; a scanner must implement the full verification and display rules below.
+
 ## 1. What it is
 
 A QR code can say who made it. The issuer signs the code's content with a key
@@ -50,11 +56,13 @@ Rules for the issuer:
   block fit. Codewords after the block are the standard padding.
 - Error correction codewords are computed over the final data codewords, as
   for any code. Any error correction level may be used.
-- Segments MUST be numeric, alphanumeric or byte mode. Byte segments MUST
-  hold UTF-8. Kanji mode, FNC1, structured append and Micro QR are out of
-  scope: such codes are unsigned. An ECI designator, if present, MUST be
-  UTF-8 (assignment 26); other character sets are out of scope. Malformed
-  segment values or invalid UTF-8 MUST NOT yield a verified result.
+- Segments MUST be numeric, alphanumeric or byte mode. The concatenated
+  payload bytes (section 4) MUST be valid UTF-8; a multibyte sequence may
+  cross byte-segment boundaries. Kanji mode, FNC1, structured append and
+  Micro QR are out of scope: such codes are unsigned. An ECI designator,
+  if present, MUST be UTF-8 (assignment 26); other character sets are out
+  of scope. Malformed segment values or invalid UTF-8 MUST NOT yield a
+  verified result.
 
 ## 3. The block
 
@@ -69,19 +77,31 @@ All integers are big-endian.
 | 8 | *n* | domain | ASCII, see below |
 | 8 + *n* | 64 | signature | Ed25519 (RFC 8032) |
 
-The block is 72 + *n* bytes: 83 for `example.com`.
+The block is 72 + *n* bytes: 83 for `example.com`, or 81 for `qrsig.org`.
+The signature is stored as 64 raw bytes, not hex or base64 text. The public
+key is not in the block; it is obtained separately (section 5).
 
 **Domain.** The host name whose keys sign the code: lowercase ASCII letters,
 digits and hyphens in dot-separated labels, at least two labels, the last
 one starting with a letter, 253 characters at most. No port, no path, no
 trailing dot, no IP address. Internationalised names are written as A-labels
-(`xn--...`).
+(`xn--...`). Each label is 1–63 characters, starts and ends with a letter
+or digit, and has only letters, digits or hyphens in between. The complete
+domain is at least four bytes long.
 
 ## 4. What is signed
 
 ```
-signature = Ed25519-Sign(private key, "qrsig1\n" || block[0 .. 8+n) || payload)
+M = ASCII("qrsig1\n") || block[0 .. 8+n) || payload
+S = Ed25519-Sign(private key, M)
+
+# One cryptographic check, given a candidate public key K:
+Ed25519-Verify(K, S, M) -> true or false
 ```
+
+`M` is the message, `S` the signature and `K` a public key. `||` means
+byte concatenation with no added separators. This notation is independent
+of any crypto library's API or argument order.
 
 - `"qrsig1\n"` is seven ASCII bytes (`71 72 73 69 67 31 0a`). They keep a
   QRSig signature from being mistaken for a signature of anything else made
@@ -91,6 +111,13 @@ signature = Ed25519-Sign(private key, "qrsig1\n" || block[0 .. 8+n) || payload)
 - `payload` is the content of the code as bytes: the segments in order, a
   numeric or alphanumeric segment as its ASCII characters, a byte segment as
   its bytes. For a code made from a text string this is the string in UTF-8.
+
+Use the original header and payload bytes, not their display encodings. Do
+not normalize Unicode, case, whitespace or URLs, or replace invalid UTF-8.
+Segment headers, ECI designators, the terminator, alignment bits, trailing
+padding and error-correction bytes are not part of `M`. The signature
+authenticates content and the domain/time claim, not image pixels or a
+particular QR encoding.
 
 ## 5. The key document
 
@@ -104,17 +131,23 @@ https://<domain>/.well-known/qrsig.json
 {
   "qrsig": 1,
   "keys": [
-    { "key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg" },
-    { "key": "...", "not_before": 1767225600, "not_after": 1798761600 }
+    { "key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg" }
   ]
 }
 ```
 
-- `key`: an Ed25519 public key, 32 bytes, base64url without padding.
-- `not_before`, `not_after`: optional Unix times. The key signs only codes
-  whose *issued at* lies within them (inclusive).
-- At most 16 keys; the document is at most 16 KiB. Unknown members are
-  ignored.
+- The document is a UTF-8 JSON object with integer `qrsig: 1` and a `keys`
+  array. The key above is public test material, not a production key.
+- Each entry is an object with `key`: an Ed25519 public key, exactly 32
+  bytes in canonical base64url without padding (43 characters).
+- `not_before`, `not_after`: optional integer Unix seconds. Missing or `null`
+  means unbounded; zero is a real timestamp, not a missing value. Booleans
+  and fractional numbers are invalid. The key is eligible only when the
+  claimed *issued at* is within both bounds, inclusively. Negative bounds
+  are allowed; reversed bounds simply admit no issue time.
+- At most 16 keys; the document is at most 16 KiB. An empty array publishes
+  no keys. Any malformed entry invalidates the document as a whole; do not
+  silently skip it. Unknown members are ignored.
 
 There are no key identifiers: a verifier tries each key. To rotate, add the
 new key, sign with it, and give the old one a `not_after`; codes already
@@ -125,10 +158,10 @@ Fetching:
 
 - HTTPS only, with ordinary certificate validation. The fetch MUST NOT follow
   redirects: the keys are the domain's own, at this address.
-- A 3xx or 4xx answer, or a body that is not a valid document, means **the
-  domain publishes no keys**.
-- A network failure, a timeout or a 5xx answer means **the keys are
-  unavailable** just now.
+- A 3xx or 4xx answer (including 404 and 429), or a malformed/oversized
+  document, means **the domain publishes no keys**.
+- A network/TLS failure, timeout, incomplete HTTP transfer or 5xx answer
+  means **the keys are unavailable** just now.
 - A verifier SHOULD cache a document, for 24 hours at most.
 
 A subdomain is its own domain: `pay.example.com` publishes its own document
@@ -145,7 +178,8 @@ Input: the data codewords of the code after error correction.
    (too short, bad domain), or the code uses a mode outside section 2:
    **unsigned**. Stop.
 3. If *issued at* is more than 24 hours ahead of the verifier's clock:
-   **invalid**. Stop.
+   **invalid**. Stop. Exactly 24 hours ahead is permitted; QRSig imposes
+   no maximum age on older codes. Applications may impose their own.
 4. Get the domain's keys (section 5). If they are unavailable:
    **unverifiable**. Stop.
 5. For each key whose validity covers *issued at*, verify the signature. If
@@ -158,6 +192,12 @@ Input: the data codewords of the code after error correction.
 | verified | A key published by the named domain signed this content and claimed issue time. |
 | invalid | The claim fails current verification (tampering, wrong/removed key, or invalid time). |
 | unverifiable | The claim could not be checked now. Not a success. |
+
+The boolean in section 4 is only a signature/key match. `verified` also
+requires the preceding parsing, time and key-discovery checks. If no key is
+eligible, the protocol result is `invalid` even though no cryptographic
+check ran. A failed lookup is not an Ed25519 `false`. A local key pin is an
+explicit alternative trust decision, not proof of live domain discovery.
 
 A block of an unknown version is *unsigned*, so later versions do not break
 today's scanners.

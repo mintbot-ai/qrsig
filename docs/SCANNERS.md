@@ -1,22 +1,32 @@
 # Adding QRSig to a QR scanner
 
+[Website & interactive demo](https://qrsig.org/) · [Specification](../SPEC.md)
+
+The path is **QR → exact bytes → domain keys → signature check → display**.
+The website's M/S/K view illustrates the cryptographic step; this guide covers
+the complete scanner flow, including failures.
+
 A scanner already does almost everything QRSig needs. It locates the code,
 samples the modules, removes the mask, de-interleaves the codewords and runs
 Reed-Solomon error correction. What comes out is the code's **data
 codewords**. The scanner then parses segments until the terminator and
 returns the text. The bytes after the terminator are thrown away.
 
-QRSig needs those bytes. That is the only change in the decoder.
+QRSig needs those bytes as well as the exact payload bytes. Preserve both
+from the same error-corrected stream; do not pair text from one scan with
+padding from another. The segment parser must also enforce the supported
+modes and byte rules below.
 
 ## 1. Keep the padding
 
-In the bit stream parser, at the point where the terminator (mode `0000`) is
-read, or where fewer than four bits remain:
+In the bit stream parser, retain the position just after a full four-bit
+terminator (mode `0000`). If no full terminator was read, there is no QRSig
+padding to inspect:
 
 ```
 payload  = bytes produced by the segments so far      (see below)
 position = number of bits consumed, terminator included
-padding  = data_codewords[ceil(position / 8) :]         # empty if no terminator was read
+padding  = data_codewords[ceil(position / 8) :] if full_terminator else empty_bytes
 ```
 
 Return `payload` and `padding` next to the text you already return.
@@ -27,8 +37,14 @@ Return `payload` and `padding` next to the text you already return.
 - alphanumeric segment: its characters as ASCII;
 - byte segment: its bytes, unchanged.
 
-If the code has a Kanji segment, FNC1 or structured append, skip QRSig: the
-code is unsigned.
+Only UTF-8 ECI (assignment 26) is supported. Concatenate the segment content
+bytes, then validate UTF-8; a multibyte sequence may cross byte-segment
+boundaries. Do not normalize text or silently replace malformed bytes.
+Segment metadata, including ECI, is not part of the payload.
+
+If the code has Kanji, FNC1, structured append or another ECI, it is outside
+QRSig v1. A general-purpose scanner may still display its ordinary content,
+but must not claim QRSig authentication. Micro QR is also out of scope.
 
 Most decoders have this spot in one function. Pointers, from reading the
 sources (check them against the version you ship):
@@ -42,7 +58,7 @@ Platform scanners that return only text (Apple Vision, Google ML Kit, the
 browser `BarcodeDetector`) cannot expose the padding to an app today. An app
 on those platforms needs its own decoder for the QRSig step, or support from
 the platform. `qrsig/qr.py` in this repository shows the whole reading path
-in about 150 lines, starting from the corners a detector reports.
+starting from the corners a detector reports.
 
 ## 2. Parse the block
 
@@ -62,8 +78,12 @@ anything missing or malformed          -> unsigned
 few seconds. Cache the answer per domain, 24 hours at most.
 
 - 200 with a valid document: its keys.
-- 3xx, 4xx or an invalid document: the domain has no keys.
-- network error, timeout, 5xx: unavailable.
+- 3xx, 4xx (including 404/429), malformed or oversized document: no keys.
+- network/TLS error, timeout, incomplete transfer or 5xx: unavailable.
+
+Validate the entire document against [section 5](../SPEC.md#5-the-key-document),
+including canonical 32-byte keys and integer time bounds. One malformed
+entry invalidates the document, rather than being silently skipped.
 
 The content can be displayed immediately, but do not enable payment or
 automatic navigation before checking the application's expected-signer policy.
@@ -79,7 +99,7 @@ A preflight DNS lookup alone does not prevent DNS rebinding.
 Use `keys.Resolver(offline=True)` or `qrsig verify --offline --pin DOMAIN=FILE`
 for no network access. An unpinned signer is then `unverifiable`. A pin is a
 local trust decision; it neither proves live domain control nor refreshes
-revocation. Keep pinned documents current. The web demo defaults to offline;
+revocation. Keep pinned documents current. The local `examples/scanner_web.py` demo defaults to offline;
 `--online` is an explicit opt-in for trusted inputs.
 
 The reference image reader refuses unsupported modes/character sets and
@@ -89,19 +109,33 @@ a QRSig badge.
 
 ## 4. Verify
 
-```
-if issued_at > now + 24 h:              -> invalid
-if keys unavailable:                    -> unverifiable
-message = "qrsig1\n" + head + payload
-for key in keys:
-    if key.not_before and issued_at < key.not_before: continue
-    if key.not_after  and issued_at > key.not_after:  continue
-    if ed25519_verify(key, signature, message):      -> verified
+Check the future-time limit **before making a network request**. With a
+well-formed block and supported payload, the rest is:
+
+```text
+if issued_at > now + 86400:                         -> invalid
+keys = resolve(domain)                              # section 3
+if keys unavailable:                               -> unverifiable
+M = ASCII("qrsig1\n") || head || payload
+S = signature                                       # 64 raw bytes
+for entry in keys:
+    if entry.not_before is not null and issued_at < entry.not_before: continue
+    if entry.not_after  is not null and issued_at > entry.not_after:  continue
+    K = base64url_decode(entry.key)                  # 32 raw bytes
+    if Ed25519.verify(K, S, M):                     -> verified
 -> invalid
 ```
 
-Ed25519 verification is in every platform's crypto library (CryptoKit,
-Tink / BouncyCastle, WebCrypto, libsodium).
+This is pseudocode, not a particular library API. Bounds are inclusive;
+`0` is a timestamp, not an omitted bound. Empty keys or no eligible keys
+produce `invalid` without a successful signature check. A lookup that could
+not complete produces `unverifiable`, not a cryptographic `false`.
+
+Use an Ed25519 implementation such as your platform crypto API or libsodium.
+Check runtime support: unavailable crypto is not a failed signature, and
+must never be displayed as success. Use raw bytes for `M`, `S` and `K`, not
+hex/base64 text. The [worked example](EXPLAINED.md#three-inputs-one-signature-check)
+shows a real check and a changed-message failure.
 
 ## 5. Show it
 
@@ -112,6 +146,13 @@ Tink / BouncyCastle, WebCrypto, libsodium).
 | unverifiable | Nothing, or a neutral "claims to be from ..., not checked" |
 | unsigned | Nothing |
 
+For an educational or diagnostic UI, keep M, S and K compact and let the
+user expand their exact contents. Show the actual key that matched, its
+encoding and fetched URL. If showing `true`/`false`, label it as the
+cryptographic result, not the four-state QRSig outcome. Changing a displayed
+address must also change the bytes being checked; do not reuse a previous
+success while input is changing or a new check is pending.
+
 Always show the domain; never a bare tick. If the content is a web link to a
 different host than the signing domain, show both.
 
@@ -121,8 +162,12 @@ one, is invalid, or is unsigned where a signature was seen before.
 
 ## 6. Test
 
-- `vectors.json`: your block parser and verifier must accept every case, and
-  reject each after flipping any one bit of the payload or the block.
+- `vectors.json`: reproduce the block bytes and accept valid cases. A
+  one-bit change in payload or block must never produce `verified`; a broken
+  header can yield `unsigned` rather than `invalid`.
+- Cover missing/empty keys, a wrong key before the matching key, zero-valued
+  and boundary timestamps, malformed documents, 404 vs timeout, and
+  byte-segment boundaries within UTF-8 sequences.
 - `examples/signed-bitcoin.png` with `examples/pay.example.com.qrsig.json`
   as the key document for `pay.example.com`: verified.
 - `examples/unsigned-bitcoin.png`: unsigned, same content.

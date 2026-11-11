@@ -1,5 +1,8 @@
 # What is actually inside a signed QR code?
 
+[Explore the interactive example on qrsig.org](https://qrsig.org/) ·
+[Specification](../SPEC.md) · [Scanner guide](SCANNERS.md)
+
 A useful mental model: **the usual instruction, plus an origin seal**.
 The seal is not another URL and does not change the payment address.
 It is hidden from the ordinary scanner's text output, **not encrypted or secret**.
@@ -65,14 +68,81 @@ This is a draft extension, not a promise of strict QR padding conformance or
 support by every phone. The signature also consumes capacity: a larger QR
 version usually means the image should be displayed larger.
 
-## How the check works
+## Three inputs. One signature check.
+
+| Input | Repository fixture | Source |
+|---|---|---|
+| **M — message** | 98 bytes: 7-byte context + 23-byte header + 68-byte payload | Reconstructed from the QR and fixed context |
+| **S — signature** | 64 raw bytes | The QR's hidden block |
+| **K — public key** | 32 raw bytes | HTTPS key document, or an explicit trusted pin |
+
+```text
+Ed25519.verify(K, S, M) → true or false
+```
+
+The key document encodes K as unpadded base64url; decode it before checking.
+The UI may show S and M as hex, but the crypto operation receives their raw
+bytes. A signature's 128 hex characters are only a display of 64 bytes.
+
+Changing the address changes M. Keep S and K unchanged and the check fails.
+Switching back restores the original message and the original result.
+This authenticates bytes, not whether a Bitcoin address is valid for payment
+or belongs to the issuer.
+
+<details>
+<summary>Run the exact check in Python</summary>
+
+Run from the repository root after installing the `read` extra. This reads
+the actual PNG; it does not use a hardcoded verification result.
+
+```python
+from pathlib import Path
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from qrsig import format as fmt, keys, qr
+
+scan = qr.read("examples/signed-bitcoin.png")
+block = fmt.parse(scan.padding)
+assert block is not None
+M = fmt.message(block.head, scan.payload)
+S = block.signature
+K = keys.parse_document(Path("examples/pay.example.com.qrsig.json").read_bytes())[0].public
+
+def matches(message):
+    try:
+        Ed25519PublicKey.from_public_bytes(K).verify(S, message)
+    except InvalidSignature:
+        return False
+    return True
+
+changed = fmt.message(block.head, scan.payload.replace(b"bc1q", b"bc1p", 1))
+print("Original:", matches(M))       # Original: True
+print("Changed:", matches(changed))  # Changed: False
+assert len(M) == 98 and len(S) == 64 and len(K) == 32
+```
+
+This is the cryptographic step only, using the repository's public test key.
+It does not fetch keys or apply their validity windows. The complete QRSig
+check follows below.
+
+</details>
+
+## From a signature match to a QRSig outcome
 
 1. Read the ordinary content and the hidden block from the same picture.
-2. Read the claimed signing domain from the block.
+2. Read the claimed signing domain and time. Reject a time more than
+   24 hours in the future before making a key request.
 3. Obtain its public keys from `https://<domain>/.well-known/qrsig.json` over
    certificate-validated HTTPS without redirects, or use a trusted local pin.
-4. Reconstruct the signed message and verify the signature with those keys.
+4. Reconstruct the signed message and check it with keys eligible for the
+   claimed issue time.
 5. Show **which domain** verified, then apply the application's trust policy.
+
+The Ed25519 boolean is not interchangeable with the protocol outcome. A
+missing key document is `invalid`; a lookup that cannot complete is
+`unverifiable`. No eligible key also means `invalid`, even if no Ed25519
+operation ran. A diagnostic UI should say “not checked”, not claim a
+cryptographic `false`, in that last case.
 
 A public key can check a signature but cannot create a new valid signature.
 The private key stays with the issuer. Anyone with the picture can inspect
@@ -101,6 +171,20 @@ in the supplied key, not proof that you contacted the real domain.
 A fourth outcome, `unverifiable`, means the keys could not be obtained (for
 example offline with no pin). It must not appear as success. `invalid` does
 not necessarily prove a forgery: a removed signing key can cause it too.
+
+## Can the signature be shorter?
+
+QRSig v1 fixes Ed25519 signatures at **64 raw bytes**. Changing the UI from
+hex to base64 does not save QR space: the block already stores bytes, not
+text. Do not truncate the signature; the v1 parser and verifier require the
+full value.
+
+A different algorithm would require a separately specified format/version
+and matching reader support. Before adding that complexity, measure whether
+its byte saving actually crosses a QR-version boundary for the intended
+payload and error-correction level. The whole block, not just S, occupies
+capacity; a shorter domain also reduces it. A smaller byte count does not
+necessarily produce a smaller module grid.
 
 ## Why this can be useful
 
@@ -143,7 +227,7 @@ wearing a copied label, needs an additional system. Copies remain valid.
 - General scanners cannot detect signature removal without an expected-signer
   policy. A required signature must fail closed, not silently downgrade.
 - Automatic online discovery reveals a lookup to the signing domain and may
-  target private network addresses. The demo is offline by default; online
+  target private network addresses. The local scanner demo is offline by default; online
   server deployments need the protections in [SCANNERS.md](SCANNERS.md).
 - This reference reader and tests are not an independent security audit, and
   lab image decoding is not a guarantee about every phone camera.

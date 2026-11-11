@@ -57,12 +57,16 @@ def document(public_keys: list[str | dict]) -> str:
     return json.dumps({"qrsig": 1, "keys": keys}, indent=2) + "\n"
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def parse_document(body: bytes) -> list[Key]:
     """The keys of a published document. ``ValueError`` when it is not one."""
     if len(body) > MAX_DOCUMENT_BYTES:
         raise ValueError("document too large")
     try:
-        doc = json.loads(body.decode("utf-8"))
+        doc = json.loads(body.decode("utf-8"), parse_constant=_reject_json_constant)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("not JSON") from exc
     if (not isinstance(doc, dict) or type(doc.get("qrsig")) is not int
