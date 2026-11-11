@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.svg" alt="QRSig icon: a QR code with a green verification seal" width="128" height="128"></p>
+
 # QRSig: signed QR codes
 
 A QR code that says who made it. **One code. Two layers.**
