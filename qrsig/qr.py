@@ -96,41 +96,55 @@ def split(data: bytes, version: int) -> tuple[bytes, bytes]:
     total = len(data) * 8
     pos = 0
 
-    def take(n: int) -> int:
+    def take(n: int, limit: int | None = None) -> int:
         nonlocal pos
         if pos + n > total:
             raise ValueError("truncated")
         pos += n
-        return (bits >> (total - pos)) & ((1 << n) - 1)
+        value = (bits >> (total - pos)) & ((1 << n) - 1)
+        if limit is not None and value >= limit:
+            raise ValueError("invalid segment value")
+        return value
 
     payload = bytearray()
     while total - pos >= 4:
         mode = take(4)
         if mode == 0:
+            payload.decode("utf-8")  # never verify text displayed with replacement characters
             return bytes(payload), data[(pos + 7) // 8:]
-        if mode == _ECI:  # a designator of one to three bytes; the data that follows says the rest
+        if mode == _ECI:
             first = take(8)
-            take(8 if first & 0xC0 == 0x80 else 16 if first & 0xE0 == 0xC0 else 0)
+            if first < 0x80:
+                assignment = first
+            elif first & 0xC0 == 0x80:
+                assignment = ((first & 0x3F) << 8) | take(8)
+            elif first & 0xE0 == 0xC0:
+                assignment = ((first & 0x1F) << 16) | take(16)
+            else:
+                raise ValueError("invalid ECI designator")
+            if assignment != 26:
+                raise ValueError("unsupported ECI: QRSig text must be UTF-8")
             continue
         if mode not in (_NUMERIC, _ALNUM, _BYTE):
             raise ValueError("unsupported mode")
         count = take(util.length_in_bits(mode, version))
         if mode == _NUMERIC:
             for _ in range(count // 3):
-                payload += b"%03d" % take(10)
+                payload += b"%03d" % take(10, 1000)
             if count % 3 == 2:
-                payload += b"%02d" % take(7)
+                payload += b"%02d" % take(7, 100)
             elif count % 3 == 1:
-                payload += b"%d" % take(4)
+                payload += b"%d" % take(4, 10)
         elif mode == _ALNUM:
             for _ in range(count // 2):
-                pair = take(11)
+                pair = take(11, 45 * 45)
                 payload += (_ALPHANUMERIC[pair // 45] + _ALPHANUMERIC[pair % 45]).encode()
             if count % 2:
-                payload += _ALPHANUMERIC[take(6)].encode()
+                payload += _ALPHANUMERIC[take(6, 45)].encode()
         else:
             for _ in range(count):
                 payload.append(take(8))
+    payload.decode("utf-8")
     return bytes(payload), b""  # the data fills the code: no terminator, no padding
 
 
@@ -234,7 +248,8 @@ def read(image) -> Scan:
     if not isinstance(image, Image.Image):
         image = Image.open(image)
     image = image.convert("RGB")
-    found = [r for r in zxingcpp.read_barcodes(image) if "Version" in r.extra and "DataMask" in r.extra]
+    found = [r for r in zxingcpp.read_barcodes(image, formats=zxingcpp.BarcodeFormat.QRCode)
+             if r.extra and all(k in r.extra for k in ("Version", "DataMask", "ECLevel"))]
     if not found:
         raise ValueError("no QR code found")
     code = found[0]

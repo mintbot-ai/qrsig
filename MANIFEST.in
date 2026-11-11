@@ -1,0 +1,4 @@
+include SPEC.md vectors.json
+recursive-include docs *.md
+recursive-include examples *.py *.png *.json
+recursive-include tools *.py

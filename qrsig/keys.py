@@ -6,6 +6,7 @@ A domain says which keys sign its codes in one small JSON document at
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import time
 import urllib.error
@@ -27,7 +28,10 @@ def b64url(data: bytes) -> str:
 
 
 def b64url_decode(text: str) -> bytes:
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    decoded = base64.b64decode(text + "=" * (-len(text) % 4), altchars=b"-_", validate=True)
+    if b64url(decoded) != text:
+        raise ValueError("not canonical unpadded base64url")
+    return decoded
 
 
 def generate() -> tuple[str, str]:
@@ -61,7 +65,8 @@ def parse_document(body: bytes) -> list[Key]:
         doc = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("not JSON") from exc
-    if not isinstance(doc, dict) or doc.get("qrsig") != 1 or not isinstance(doc.get("keys"), list):
+    if (not isinstance(doc, dict) or type(doc.get("qrsig")) is not int
+            or doc["qrsig"] != 1 or not isinstance(doc.get("keys"), list)):
         raise ValueError("not a qrsig 1 document")
     if len(doc["keys"]) > MAX_KEYS:
         raise ValueError("too many keys")
@@ -101,11 +106,15 @@ def fetch(domain: str, *, timeout: float = 5.0) -> list[Key]:
     try:
         with opener.open(request, timeout=timeout) as response:
             body = response.read(MAX_DOCUMENT_BYTES + 1)
+            # HTTPResponse.read(amount) does not raise for a short Content-Length
+            # body. Its remaining length distinguishes EOF from our size cutoff.
+            if len(body) <= MAX_DOCUMENT_BYTES and response.length:
+                raise http.client.IncompleteRead(body, response.length)
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 500:
             return []
         raise KeysUnavailable(f"{domain} answered {exc.code}") from exc
-    except (urllib.error.URLError, OSError) as exc:
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
         raise KeysUnavailable(f"{domain} could not be reached") from exc
     try:
         return parse_document(body)
@@ -116,10 +125,13 @@ def fetch(domain: str, *, timeout: float = 5.0) -> list[Key]:
 class Resolver:
     """``keys_for`` for ``format.verify``: fetches a domain's keys and keeps
     them for an hour. Documents handed in with ``pin`` are used as they are,
-    without the network (tests, offline checks, a wallet's own trust list)."""
+    without the network. ``offline=True`` refuses ALL unpinned domains.
+    Online fetching is not an SSRF boundary; server callers need controlled
+    egress. Pins are local trust decisions and do not refresh revocation."""
 
-    def __init__(self, fetch=fetch, cache_seconds: float = CACHE_SECONDS):
+    def __init__(self, fetch=fetch, cache_seconds: float = CACHE_SECONDS, *, offline: bool = False):
         self._fetch = fetch
+        self._offline = offline
         self._cache_seconds = cache_seconds
         self._pinned: dict[str, list[Key]] = {}
         self._cached: dict[str, tuple[float, list[Key]]] = {}
@@ -130,6 +142,8 @@ class Resolver:
     def __call__(self, domain: str) -> list[Key]:
         if domain in self._pinned:
             return self._pinned[domain]
+        if self._offline:
+            raise KeysUnavailable("offline: no pinned keys for this domain")
         kept = self._cached.get(domain)
         if kept and time.monotonic() - kept[0] < self._cache_seconds:
             return kept[1]

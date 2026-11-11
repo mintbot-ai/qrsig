@@ -15,7 +15,12 @@ skips. So:
 - the content is untouched: the URL, payment URI or text is exactly what it
   would be unsigned;
 - a scanner that does not know QRSig reads the code as it reads any other;
-- the code is a standard QR code with its full error correction.
+- the code retains QR structure and error correction over all data codewords.
+
+QRSig replaces the pad byte values prescribed by ISO/IEC 18004. It is a
+reader-compatible extension in the implementations tested, not a claim that
+the modified padding strictly conforms to that standard. Compatibility with
+untested readers must be measured, not assumed.
 
 The whole standard is three things: a **block** of bytes in the padding
 (section 3), a **key document** on the issuer's domain (section 5) and a
@@ -47,7 +52,9 @@ Rules for the issuer:
   for any code. Any error correction level may be used.
 - Segments MUST be numeric, alphanumeric or byte mode. Byte segments MUST
   hold UTF-8. Kanji mode, FNC1, structured append and Micro QR are out of
-  scope: such codes are unsigned.
+  scope: such codes are unsigned. An ECI designator, if present, MUST be
+  UTF-8 (assignment 26); other character sets are out of scope. Malformed
+  segment values or invalid UTF-8 MUST NOT yield a verified result.
 
 ## 3. The block
 
@@ -148,8 +155,8 @@ Input: the data codewords of the code after error correction.
 | Outcome | Meaning |
 |---|---|
 | unsigned | An ordinary code. Nothing to say. |
-| verified | The named domain signed exactly this content at that time. |
-| invalid | The code claims a domain that did not sign it. Treat as an attack or a broken issuer. |
+| verified | A key published by the named domain signed this content and claimed issue time. |
+| invalid | The claim fails current verification (tampering, wrong/removed key, or invalid time). |
 | unverifiable | The claim could not be checked now. Not a success. |
 
 A block of an unknown version is *unsigned*, so later versions do not break
@@ -190,8 +197,10 @@ today's scanners.
   the code small.
 - **Keys.** Keep the private key where the codes are made and nowhere else.
   Use a key for QRSig only.
-- **Fail open.** If signing fails, issue the unsigned code: the content is
-  the point.
+- **Signing failure.** An optional-origin badge MAY fall back to an unsigned
+  code, explicitly reported as such. An application that requires authenticity
+  MUST fail closed instead. The reference `qr.signed()` raises on failure;
+  it never silently returns an unsigned code.
 
 ## 9. Security considerations
 
@@ -213,8 +222,19 @@ today's scanners.
   domain's HTTPS.
 - **Revocation is by removal** and takes effect as caches expire (24 hours
   at most).
-- **Clocks.** *Issued at* is the issuer's claim. It is signed, so a third
-  party cannot change it, but an issuer can write any time.
+- **Clocks.** *Issued at* is the issuer's claim, not a trusted timestamp or
+  expiry. A third party cannot change it, but an issuer (or someone with a
+  stolen private key) can backdate a new code. `not_after` alone therefore
+  cannot revoke a compromised key; remove the key.
+- **Not secret.** The block is publicly readable. Neither private keys nor
+  credentials belong there. A signature authenticates bytes; it does not
+  encrypt them.
+- **Network input is hostile.** A signing domain may resolve to private or
+  loopback addresses. Server verifiers MUST restrict egress or use a transport
+  that connects only to validated public destinations, including after DNS
+  changes. A DNS pre-check followed by a fresh resolution is insufficient.
+  The reference online resolver is not an SSRF boundary; use offline pins
+  or a controlled network when handling untrusted images.
 
 ## 10. Privacy
 

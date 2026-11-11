@@ -31,7 +31,10 @@ def _keygen(args) -> int:
 
 
 def _sign(args) -> int:
-    private = json.loads(Path(args.key).read_text())["private_key"]
+    document = json.loads(Path(args.key).read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or not isinstance(document.get("private_key"), str):
+        raise ValueError("key file needs a 'private_key' string")
+    private = document["private_key"]
     code = qr.signed(args.text, args.domain, keys.private_key(private), ec=args.ec)
     code.make_image().save(args.out)
     print(f"{args.out}: {code.modules_count}x{code.modules_count} modules, signed by {args.domain}")
@@ -51,15 +54,13 @@ def describe(result: dict) -> str:
 
 
 def _verify(args) -> int:
-    resolver = keys.Resolver()
+    resolver = keys.Resolver(offline=args.offline)
     for item in args.pin:
         domain, _, path = item.partition("=")
+        if not fmt.is_domain(domain) or not path:
+            raise ValueError("--pin must be DOMAIN=FILE with a valid QRSig domain")
         resolver.pin(domain, Path(path).read_bytes())
-    try:
-        result = qr.check(args.image, resolver)
-    except (OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    result = qr.check(args.image, resolver)
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -86,9 +87,14 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--pin", action="append", default=[], metavar="DOMAIN=FILE",
                    help="use this key document for the domain instead of fetching it")
     v.add_argument("--json", action="store_true")
+    v.add_argument("--offline", action="store_true", help="never fetch keys; use pinned documents only")
     v.set_defaults(run=_verify)
     args = parser.parse_args(argv)
-    return args.run(args)
+    try:
+        return args.run(args)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

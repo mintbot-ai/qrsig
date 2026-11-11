@@ -65,8 +65,27 @@ few seconds. Cache the answer per domain, 24 hours at most.
 - 3xx, 4xx or an invalid document: the domain has no keys.
 - network error, timeout, 5xx: unavailable.
 
-Do this **after** showing the content, never before: a scan must stay
-instant, and the signature line can appear a moment later.
+The content can be displayed immediately, but do not enable payment or
+automatic navigation before checking the application's expected-signer policy.
+
+The reference resolver uses HTTPS, certificate checks, no redirects, a
+per-operation timeout and a bounded document size. It is NOT SSRF-safe:
+DNS can point a syntactically valid domain at internal addresses, and urllib
+uses configured environment proxies. Do not expose online verification as a
+public upload service without controlled egress, connection-bound destination
+validation, total deadlines, upload/pixel limits and concurrency/rate limits.
+A preflight DNS lookup alone does not prevent DNS rebinding.
+
+Use `keys.Resolver(offline=True)` or `qrsig verify --offline --pin DOMAIN=FILE`
+for no network access. An unpinned signer is then `unverifiable`. A pin is a
+local trust decision; it neither proves live domain control nor refreshes
+revocation. Keep pinned documents current. The web demo defaults to offline;
+`--online` is an explicit opt-in for trusted inputs.
+
+The reference image reader refuses unsupported modes/character sets and
+malformed segments with a read error; it never labels them verified. A
+full-purpose scanner can still show its own normally decoded content without
+a QRSig badge.
 
 ## 4. Verify
 

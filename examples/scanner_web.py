@@ -5,9 +5,10 @@ and who signed it.
     python examples/scanner_web.py                 # http://127.0.0.1:8765
     python examples/scanner_web.py --pin pay.example.com=examples/pay.example.com.qrsig.json
 
-The signer's keys are fetched from https://<domain>/.well-known/qrsig.json;
-``--pin`` uses a document on disk for a domain instead (the demo codes in this
-directory are signed for pay.example.com, which publishes nothing).
+Offline by default: ``--pin`` uses a trusted document on disk. ``--online``
+opts into HTTPS requests to signer-controlled domains (trusted inputs only;
+not SSRF-hardened). The demo codes use the public test key for pay.example.com.
+Never expose this demo as a public upload service.
 
 Standard library plus qrsig[read]. A demo: it listens on localhost only.
 """
@@ -25,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from qrsig import keys, qr  # noqa: E402
 
 MAX_UPLOAD = 12 * 1024 * 1024
-RESOLVER = keys.Resolver()
+RESOLVER = keys.Resolver(offline=True)
 
 PAGE = """<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -110,10 +111,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
+    global RESOLVER
     parser = argparse.ArgumentParser(description="A QRSig scanner in the browser (demo, localhost only).")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--pin", action="append", default=[], metavar="DOMAIN=FILE")
+    parser.add_argument("--online", action="store_true", help="allow HTTPS requests to signer-controlled hosts; trusted inputs only")
     args = parser.parse_args(argv)
+    RESOLVER = keys.Resolver(offline=not args.online)
     for item in args.pin:
         domain, _, path = item.partition("=")
         RESOLVER.pin(domain, Path(path).read_bytes())
